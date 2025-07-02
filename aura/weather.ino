@@ -24,6 +24,8 @@
 #define LOCATION_DEFAULT "London"
 #define DEFAULT_CAPTIVE_SSID "Aura"
 #define UPDATE_INTERVAL 600000UL  // 10 minutes
+#define CALENDAR_URL "https://example.com/calendar.ics"
+#define MAX_EVENTS 5
 
 SPIClass touchscreenSPI = SPIClass(VSPI);
 XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
@@ -68,6 +70,16 @@ static lv_obj_t *location_win = nullptr;
 static lv_obj_t *unit_switch;
 static lv_obj_t *clock_24hr_switch;
 static lv_obj_t *lbl_clock;
+static lv_obj_t *page_cont;
+static lv_obj_t *weather_page;
+static lv_obj_t *calendar_page;
+static lv_obj_t *lbl_events[MAX_EVENTS];
+
+struct CalendarEvent {
+  char when[32];
+  char summary[64];
+};
+static CalendarEvent events[MAX_EVENTS];
 
 // Weather icons
 LV_IMG_DECLARE(icon_blizzard);
@@ -132,6 +144,8 @@ static void screen_event_cb(lv_event_t *e);
 static void settings_event_handler(lv_event_t *e);
 const lv_img_dsc_t *choose_image(int wmo_code, int is_day);
 const lv_img_dsc_t *choose_icon(int wmo_code, int is_day);
+void create_calendar_page();
+void fetch_and_update_calendar();
 
 
 int day_of_week(int y, int m, int d) {
@@ -278,6 +292,7 @@ void setup() {
   lv_obj_clean(lv_scr_act());
   create_ui();
   fetch_and_update_weather();
+  fetch_and_update_calendar();
 }
 
 void flush_wifi_splashscreen(uint32_t ms = 200) {
@@ -299,6 +314,7 @@ void loop() {
 
   if (millis() - last >= UPDATE_INTERVAL) {
     fetch_and_update_weather();
+    fetch_and_update_calendar();
     last = millis();
   }
 
@@ -340,10 +356,29 @@ void create_ui() {
   lv_obj_set_style_bg_grad_dir(scr, LV_GRAD_DIR_VER, LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-  // Trigger settings screen on touch
-  lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_CLICKED, NULL);
+  page_cont = lv_obj_create(scr);
+  lv_obj_set_size(page_cont, SCREEN_WIDTH * 2, SCREEN_HEIGHT);
+  lv_obj_set_scroll_dir(page_cont, LV_DIR_HOR);
+  lv_obj_set_scroll_snap_x(page_cont, LV_SCROLL_SNAP_CENTER);
+  lv_obj_set_scrollbar_mode(page_cont, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_style_pad_all(page_cont, 0, 0);
+  lv_obj_set_style_pad_gap(page_cont, 0, 0);
+  lv_obj_set_flex_flow(page_cont, LV_FLEX_FLOW_ROW);
 
-  img_today_icon = lv_img_create(scr);
+  weather_page = lv_obj_create(page_cont);
+  lv_obj_set_size(weather_page, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_obj_clear_flag(weather_page, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(weather_page, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_add_event_cb(weather_page, screen_event_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(weather_page, screen_event_cb, LV_EVENT_GESTURE, NULL);
+
+  calendar_page = lv_obj_create(page_cont);
+  lv_obj_set_size(calendar_page, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_obj_clear_flag(calendar_page, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_opa(calendar_page, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_add_event_cb(calendar_page, screen_event_cb, LV_EVENT_GESTURE, NULL);
+
+  img_today_icon = lv_img_create(weather_page);
   lv_img_set_src(img_today_icon, &image_partly_cloudy);
   lv_obj_align(img_today_icon, LV_ALIGN_TOP_MID, -64, 4);
 
@@ -352,25 +387,25 @@ void create_ui() {
   lv_style_set_text_color(&default_label_style, lv_color_hex(0xFFFFFF));
   lv_style_set_text_opa(&default_label_style, LV_OPA_COVER);
 
-  lbl_today_temp = lv_label_create(scr);
+  lbl_today_temp = lv_label_create(weather_page);
   lv_label_set_text(lbl_today_temp, "--°C");
   lv_obj_set_style_text_font(lbl_today_temp, &lv_font_montserrat_42, LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_today_temp, LV_ALIGN_TOP_MID, 45, 25);
   lv_obj_add_style(lbl_today_temp, &default_label_style, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-  lbl_today_feels_like = lv_label_create(scr);
+  lbl_today_feels_like = lv_label_create(weather_page);
   lv_label_set_text(lbl_today_feels_like, "Feels Like --°C");
   lv_obj_set_style_text_font(lbl_today_feels_like, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_color(lbl_today_feels_like, lv_color_hex(0xe4ffff), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_today_feels_like, LV_ALIGN_TOP_MID, 45, 75);
 
-  lbl_forecast = lv_label_create(scr);
+  lbl_forecast = lv_label_create(weather_page);
   lv_label_set_text(lbl_forecast, "SEVEN DAY FORECAST");
   lv_obj_set_style_text_font(lbl_forecast, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_color(lbl_forecast, lv_color_hex(0xe4ffff), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_forecast, LV_ALIGN_TOP_LEFT, 20, 110);
 
-  box_daily = lv_obj_create(scr);
+  box_daily = lv_obj_create(weather_page);
   lv_obj_set_size(box_daily, 220, 180);
   lv_obj_align(box_daily, LV_ALIGN_TOP_LEFT, 10, 135);
   lv_obj_set_style_bg_color(box_daily, lv_color_hex(0x5e9bc8), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -406,7 +441,7 @@ void create_ui() {
     lv_obj_align(img_daily[i], LV_ALIGN_TOP_LEFT, 72, i * 24);
   }
 
-  box_hourly = lv_obj_create(scr);
+  box_hourly = lv_obj_create(weather_page);
   lv_obj_set_size(box_hourly, 220, 180);
   lv_obj_align(box_hourly, LV_ALIGN_TOP_LEFT, 10, 135);
   lv_obj_set_style_bg_color(box_hourly, lv_color_hex(0x5e9bc8), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -445,11 +480,13 @@ void create_ui() {
   lv_obj_add_flag(box_hourly, LV_OBJ_FLAG_HIDDEN);
 
   // Create clock label in the top-right corner
-  lbl_clock = lv_label_create(scr);
+  lbl_clock = lv_label_create(weather_page);
   lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xb9ecff), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_label_set_text(lbl_clock, "");
   lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -10, 5);
+
+  create_calendar_page();
 }
 
 void populate_results_dropdown() {
@@ -514,7 +551,20 @@ static void location_cancel_event_cb(lv_event_t *e) {
 }
 
 void screen_event_cb(lv_event_t *e) {
-  create_settings_window();
+  lv_event_code_t code = lv_event_get_code(e);
+  if(code == LV_EVENT_CLICKED) {
+    create_settings_window();
+    return;
+  }
+
+  if(code == LV_EVENT_GESTURE) {
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+    if(dir == LV_DIR_LEFT) {
+      lv_obj_scroll_to_x(page_cont, SCREEN_WIDTH, LV_ANIM_ON);
+    } else if(dir == LV_DIR_RIGHT) {
+      lv_obj_scroll_to_x(page_cont, 0, LV_ANIM_ON);
+    }
+  }
 }
 
 void daily_cb(lv_event_t *e) {
@@ -1096,4 +1146,95 @@ const lv_img_dsc_t* choose_icon(int code, int is_day) {
         ? &icon_mostly_cloudy_day
         : &icon_mostly_cloudy_night;
   }
+}
+
+static String extract_field(const String &block, const char *key) {
+  int i = block.indexOf(key);
+  if (i == -1) return String();
+  i = block.indexOf(':', i);
+  if (i == -1) return String();
+  int e = block.indexOf('\n', i);
+  if (e == -1) e = block.length();
+  return block.substring(i + 1, e);
+}
+
+static String format_ics_datetime(const String &dt) {
+  if (dt.length() >= 15) {
+    int mon = dt.substring(4, 6).toInt();
+    int day = dt.substring(6, 8).toInt();
+    int hour = dt.substring(9, 11).toInt();
+    int min = dt.substring(11, 13).toInt();
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%02d/%02d %02d:%02d", mon, day, hour, min);
+    return String(buf);
+  } else if (dt.length() == 8) {
+    int mon = dt.substring(4, 6).toInt();
+    int day = dt.substring(6, 8).toInt();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d/%02d", mon, day);
+    return String(buf);
+  }
+  return dt;
+}
+
+static void parse_calendar(const String &ics) {
+  int pos = 0;
+  int idx = 0;
+  while (idx < MAX_EVENTS) {
+    int b = ics.indexOf("BEGIN:VEVENT", pos);
+    if (b == -1) break;
+    int e = ics.indexOf("END:VEVENT", b);
+    if (e == -1) break;
+    String block = ics.substring(b, e);
+    String summ = extract_field(block, "SUMMARY");
+    String start = extract_field(block, "DTSTART");
+    start = format_ics_datetime(start);
+    summ.trim();
+    start.trim();
+    summ.toCharArray(events[idx].summary, sizeof(events[idx].summary));
+    start.toCharArray(events[idx].when, sizeof(events[idx].when));
+    idx++;
+    pos = e + 10;
+  }
+  for (; idx < MAX_EVENTS; idx++) {
+    events[idx].summary[0] = '\0';
+    events[idx].when[0] = '\0';
+  }
+}
+
+static void update_calendar_ui() {
+  for (int i = 0; i < MAX_EVENTS; i++) {
+    if (events[i].summary[0]) {
+      lv_label_set_text_fmt(lbl_events[i], "%s - %s", events[i].when, events[i].summary);
+    } else {
+      lv_label_set_text(lbl_events[i], "");
+    }
+  }
+}
+
+void create_calendar_page() {
+  lv_obj_t *lbl = lv_label_create(calendar_page);
+  lv_label_set_text(lbl, "Calendar");
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 5);
+
+  for (int i = 0; i < MAX_EVENTS; i++) {
+    lbl_events[i] = lv_label_create(calendar_page);
+    lv_obj_set_width(lbl_events[i], 220);
+    lv_label_set_long_mode(lbl_events[i], LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(lbl_events[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_align(lbl_events[i], LV_ALIGN_TOP_LEFT, 10, 30 + i * 26);
+  }
+}
+
+void fetch_and_update_calendar() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  http.begin(CALENDAR_URL);
+  if (http.GET() == HTTP_CODE_OK) {
+    String data = http.getString();
+    parse_calendar(data);
+    update_calendar_ui();
+  }
+  http.end();
 }
